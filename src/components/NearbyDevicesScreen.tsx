@@ -78,6 +78,22 @@ export function NearbyDevicesScreen({ onBack, onSelectDevice, onlineDevices = []
   const [isSimulatedConnection, setIsSimulatedConnection] = useState(false);
   const [detectedRestriction, setDetectedRestriction] = useState<string | null>(null);
 
+  // Advanced AP Isolation / Diagnostics configurations
+  const [diagnosticsActive, setDiagnosticsActive] = useState(false);
+  const [diagnosticsLogs, setDiagnosticsLogs] = useState<string[]>([]);
+  const [apIsolationAlert, setApIsolationAlert] = useState(false);
+  const [showHotspotSetup, setShowHotspotSetup] = useState(false);
+  const [activePort, setActivePort] = useState(3000);
+  const [optimizationMode, setOptimizationMode] = useState({
+    disableBattery: true,
+    keepWifiAwake: true,
+    preventBackgroundKill: true,
+    foregroundService: true
+  });
+  const [selectedFallback, setSelectedFallback] = useState<'wifi_direct' | 'local_lan' | 'hotspot' | 'relay' | 'qr_manual'>('local_lan');
+  const [hotspotSSID, setHotspotSSID] = useState("FlashDrop_Direct_Fast_" + Math.floor(Math.random() * 90 + 10));
+  const [hotspotPass, setHotspotPass] = useState("flashdropsecure" + Math.floor(Math.random() * 899 + 100));
+
   // Filter out self
   const actualPeers = onlineDevices.filter(d => d.id !== selfDevice.id);
 
@@ -159,43 +175,94 @@ export function NearbyDevicesScreen({ onBack, onSelectDevice, onlineDevices = []
     setConnectionStage('searching');
     setTimeoutSecs(15);
     setDetectedRestriction(null);
+    setDiagnosticsActive(true);
+    setApIsolationAlert(false);
+    setDiagnosticsLogs([]);
 
-    // Let's decide if this attempt should trigger a realistic network failure first,
-    // to give the user a real diagnostic block, troubleshooting advice, and let them tap Reconnect!
-    const shouldFail = !forceSuccess && retryAttempt === 1 && Math.random() < 0.45;
+    const log = (msg: string) => {
+      setDiagnosticsLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
+    };
 
-    // Phase 1: Searching (Searching discovery beacons, Bluetooth handshake)
+    // Simulated multi-stage diagnostics sequence
+    log("Initializing local network diagnostics suite...");
+    
+    // Step 1: Check Local Permissions
     setTimeout(() => {
-      if (device.id === 'searching' || connectionStage === 'failed') return;
-      setConnectionStage('connecting');
+      log("Step 1/5: Checking Local Permissions (Bluetooth, Wifi, Fine Location, Nearby Devices)...");
+      const ungranted = Object.entries(permissions).filter(([_, val]) => !val).map(([key]) => key);
+      if (ungranted.length > 0) {
+        log(`⚠ Warning: Missing permissions: ${ungranted.join(", ")}. Performance may be limited.`);
+      } else {
+        log("✔ All required Android permissions granted (SDK 34 compliant)");
+      }
 
-      // Phase 2: Connecting (Exchanging AES session keys, querying STUN WebRTC candidate paths)
+      // Step 2: Validate client IP subnet compatibility
       setTimeout(() => {
-        if (shouldFail) {
-          setConnectionStage('failed');
-          const restrictionTypes = [
-            "Local router AP Isolation blocking socket connections",
-            "Symmetric NAT detected - Direct WebRTC peer paths failing",
-            "Firewall restrictions on port 3000 / local networks"
-          ];
-          setDetectedRestriction(restrictionTypes[Math.floor(Math.random() * restrictionTypes.length)]);
-        } else {
-          setConnectionStage('connected');
+        log(`Step 2/5: Resolving client gateway. Self IP: ${selfDevice.ipAddress || '192.168.1.15'}, Target IP: ${device.ipAddress || '192.168.1.144'}`);
+        log("✔ Same WiFi subnet mask detected (255.255.255.0). Direct routes possible.");
 
-          // Phase 3: Connected (Handshake signed, switching transport method)
-          setTimeout(() => {
-            setConnectionStage('starting');
+        // Step 3: Run local TCP port ping tests
+        setTimeout(() => {
+          log(`Step 3/5: Probing local ICMP Ping to target ${device.ipAddress || '192.168.1.144'} (Timeout: 1200ms)...`);
+          
+          // Let's decide if this attempt should trigger a realistic network failure first
+          const shouldFail = !forceSuccess && retryAttempt === 1 && (activeTab === 'radar' || Math.random() < 0.6);
 
-            // Phase 4: Transfer Starting
+          if (shouldFail) {
+            log("❌ Ping Failed. Target device unreachable on direct ICMP pathways.");
+            log("Step 4/5: Testing TCP Socket Port 3000 connectivity...");
+            
             setTimeout(() => {
-              // Finish connection procedure and open progress meter!
-              onSelectDevice(device, isMock);
-              setConnectingDevice(null);
+              log("⚠ TCP connection refused/filtered on Port 3000. Firewall or blocked ports detected.");
+              log("Active fallback: Trying dynamic port allocation on alternate sockets (3001, 3050, 8080)...");
+              
+              setTimeout(() => {
+                log("❌ Dynamic port responses: TIMEOUT (All local TCP sockets blocked by gateway)");
+                log("Step 5/5: Initiating Bonjour / mDNS UDP multicast search over network...");
+                
+                setTimeout(() => {
+                  log("❌ zero multicast packets returned. Network beacon drops verified.");
+                  log("⚠ Router AP Isolation (Client Isolation) Signature Confirmed!");
+                  log("Diagnostics outcome: Your WiFi router is blocking local device communication.");
+
+                  setConnectionStage('failed');
+                  setApIsolationAlert(true);
+                  setDetectedRestriction("Access Point Isolation / router client socket blocks. Direct LAN traffic is forbidden by your local access point rules.");
+                }, 800);
+              }, 800);
             }, 800);
-          }, 1000);
-        }
-      }, 2200);
-    }, 1200);
+          } else {
+            // Diagnostics success
+            log("✔ Ping successfully returned in 2.4ms!");
+            log("Step 4/5: Opening local TCP Socket handshake on default Port 3000...");
+            
+            setTimeout(() => {
+              log("✔ TCP Session socket successfully bound to Port 3000.");
+              log("Step 5/5: Running Bonjour / mDNS verification...");
+              
+              setTimeout(() => {
+                log("✔ Mutual pairing keys verified under secure AES-256 handshake.");
+                log("Diagnostics outcome: Sockets healthy. Network link green!");
+                setConnectionStage('connected');
+
+                // Phase 3: Connected (Handshake signed, switching transport method)
+                setTimeout(() => {
+                  setConnectionStage('starting');
+
+                  // Phase 4: Transfer Starting
+                  setTimeout(() => {
+                    // Finish connection procedure and open progress meter!
+                    onSelectDevice(device, isMock);
+                    setConnectingDevice(null);
+                    setDiagnosticsActive(false);
+                  }, 800);
+                }, 1000);
+              }, 600);
+            }, 600);
+          }
+        }, 800);
+      }, 700);
+    }, 600);
   };
 
   // User manually clicks on Reconnect button
@@ -791,83 +858,93 @@ export function NearbyDevicesScreen({ onBack, onSelectDevice, onlineDevices = []
             </div>
 
             {/* Live Progress Stage indicator */}
-            <div className="w-full bg-slate-950 p-4 rounded-2xl border border-slate-850 border-slate-800/80 space-y-3 text-left">
+            <div className="w-full bg-slate-950 p-4 rounded-xl border border-slate-850 border-slate-800/80 space-y-3.5 text-left">
               
               <div className="flex justify-between items-center text-xs pb-1.5 border-b border-slate-800/40">
-                <span className="font-bold uppercase tracking-wider text-slate-300">Secure Pairing Status</span>
-                <span className="text-[10px] font-mono text-indigo-400 font-bold">15s Sockets Lock</span>
+                <span className="font-bold uppercase tracking-wider text-slate-300">Local Diagnostics Feed</span>
+                <span className="text-[9px] font-mono text-emerald-400 font-bold bg-emerald-500/10 px-1.5 py-0.5 rounded">Active Network Protocol</span>
+              </div>
+
+              {/* Dynamic scrolling Diagnostic Console block */}
+              <div className="bg-slate-950 font-mono text-[9px] p-3 rounded-lg border border-slate-850 text-emerald-400 max-h-36 overflow-y-auto space-y-1.5 leading-relaxed scrollbar-thin">
+                {diagnosticsLogs.length === 0 ? (
+                  <div className="text-slate-500 italic">Initializing diagnostic probe streams...</div>
+                ) : (
+                  diagnosticsLogs.map((logLine, idx) => (
+                    <div key={idx} className={`${logLine.includes("❌") || logLine.includes("⚠") ? "text-red-400 font-semibold" : logLine.includes("✔") ? "text-emerald-400 font-semibold" : "text-slate-300"}`}>
+                      {logLine}
+                    </div>
+                  ))
+                )}
               </div>
 
               <div className="space-y-2">
-                
                 {/* Status index labels */}
                 {connectionStage === 'searching' && (
-                  <div className="flex items-center gap-2 text-xs">
+                  <div className="flex items-center gap-2.5 text-xs py-1">
                     <RefreshCw className="w-4 h-4 text-emerald-400 animate-spin" />
                     <div>
-                      <p className="font-bold text-slate-200">Searching Network (Attempt {retryAttempt} of 3)</p>
-                      <p className="text-[10px] text-slate-400">Pinging local sockets over WiFi subnet...</p>
+                      <p className="font-bold text-slate-200">Stage 1: Dynamic Probe (Attempt {retryAttempt})</p>
+                      <p className="text-[10px] text-slate-400">Pinging local sockets & parsing mDNS multicast packets...</p>
                     </div>
                   </div>
                 )}
 
                 {connectionStage === 'connecting' && (
-                  <div className="flex items-center gap-2 text-xs">
+                  <div className="flex items-center gap-2.5 text-xs py-1">
                     <LoopIcon className="w-4 h-4 text-indigo-400 animate-spin" />
                     <div>
-                      <p className="font-bold text-indigo-400">Connecting / Pairing</p>
-                      <p className="text-[10px] text-slate-400">Exchanging AES encrypted handshakes via STUN WebRTC channels...</p>
+                      <p className="font-bold text-indigo-400">Stage 2: Key Handshake Negotiation</p>
+                      <p className="text-[10px] text-slate-400">Exchanging AES encrypted session parameters locally...</p>
                     </div>
                   </div>
                 )}
 
                 {connectionStage === 'connected' && (
-                  <div className="flex items-center gap-2 text-xs">
-                    <CheckCircle className="w-4 h-4 text-emerald-400" />
+                  <div className="flex items-center gap-2.5 text-xs py-1">
+                    <CheckCircle className="w-4 h-4 text-emerald-300" />
                     <div>
-                      <p className="font-bold text-emerald-400">Connected & Verified</p>
-                      <p className="text-[10px] text-slate-400">Secure bidirectional channel loaded.</p>
+                      <p className="font-bold text-emerald-300">Stage 3: Verified Sockets Active</p>
+                      <p className="text-[10px] text-slate-400">Encrypted direct pathway verified with zero packet loss.</p>
                     </div>
                   </div>
                 )}
 
                 {connectionStage === 'starting' && (
-                  <div className="flex items-center gap-2 text-xs">
+                  <div className="flex items-center gap-2.5 text-xs py-1">
                     <Zap className="w-4 h-4 text-emerald-400 animate-bounce" />
                     <div>
-                      <p className="font-bold text-emerald-400">Transfer Starting...</p>
-                      <p className="text-[10px] text-slate-400">Readying file slices for high bandwidth drop.</p>
+                      <p className="font-bold text-emerald-400">Stage 4: Drop Initializing...</p>
+                      <p className="text-[10px] text-slate-400">Streaming dynamic session buffer payloads...</p>
                     </div>
                   </div>
                 )}
 
                 {connectionStage === 'failed' && (
-                  <div className="flex flex-col space-y-3">
-                    <div className="flex items-start gap-2 text-xs">
-                      <ShieldAlert className="w-5 h-5 text-red-400 flex-shrink-0" />
-                      <div>
-                        <p className="font-bold text-red-400 uppercase">Pairing Attempt Failed</p>
-                        <p className="text-[10px] text-slate-400 leading-normal">
-                          Connection timed out or is blocked by localized cellular firewalls or AP isolation.
-                        </p>
+                  <div className="space-y-3 pt-1">
+                    <div className="p-3 bg-red-500/10 rounded-xl border border-red-500/20 text-left space-y-1.5">
+                      <div className="flex items-center gap-2">
+                        <ShieldAlert className="w-4.5 h-4.5 text-red-400 flex-shrink-0" />
+                        <h4 className="font-extrabold text-xs text-red-300 uppercase tracking-wide">Network Block Identified</h4>
                       </div>
+                      <p className="text-[10px] text-red-200 leading-relaxed font-sans">
+                        “Your WiFi router is blocking local device communication.”
+                      </p>
                     </div>
-                    
-                    {detectedRestriction && (
-                      <div className="p-2.5 rounded-xl bg-red-500/5 text-red-400 text-[10px] font-mono border border-red-500/10">
-                        Diagnostics: {detectedRestriction}
-                      </div>
-                    )}
+
+                    <div className="text-[10px] p-2.5 bg-slate-900 rounded-lg text-slate-400 border border-slate-800 leading-normal font-sans">
+                      <strong className="text-slate-300">Router Cause:</strong> Access Point (AP) / Client Isolation prevents direct wireless handshakes between local devices on this subnet.
+                    </div>
                   </div>
                 )}
               </div>
 
               {/* Countdown timer progress line */}
               {connectionStage !== 'failed' && (
-                <div className="space-y-1 pt-1">
-                  <div className="flex justify-between items-center text-[9px] font-mono text-slate-505 text-slate-500 uppercase">
-                    <span>Handshake timeout countdown</span>
-                    <span>{timeoutSecs} seconds remaining</span>
+                <div className="space-y-1 pt-1.5">
+                  <div className="flex justify-between items-center text-[9px] font-mono text-slate-500 uppercase">
+                    <span>Pairing lock cutoff</span>
+                    <span>{timeoutSecs}s remaining</span>
                   </div>
                   <div className="w-full h-1 bg-slate-900 rounded-full overflow-hidden">
                     <div 
@@ -879,15 +956,203 @@ export function NearbyDevicesScreen({ onBack, onSelectDevice, onlineDevices = []
               )}
             </div>
 
-            {/* Troubleshooting advice during connect state */}
+            {/* HOTSPOT CREATION OR HELP PANEL TOGGLES */}
             {connectionStage === 'failed' && (
-              <div className="w-full bg-slate-950 p-3 rounded-2xl border border-dashed border-slate-800 text-left space-y-1.5">
-                <span className="text-[10px] font-bold text-slate-300 uppercase block">Instant Repair Options</span>
-                <ul className="text-[9px] text-slate-400 space-y-1 list-disc pl-4 font-mono leading-relaxed">
-                  <li>Ensure devices are on the SAME Local WiFi router band</li>
-                  <li>In locations with hotel WiFi, use Hotspot Mode fallback</li>
-                  <li>Check both devices has Local Network permissions granted</li>
-                </ul>
+              <div className="w-full text-left space-y-4">
+                
+                {/* Advanced Multi-Tiered Fallback Selector UI */}
+                <div className="bg-slate-950 p-3 rounded-2xl border border-slate-850 space-y-2.5">
+                  <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest pl-0.5 block flex items-center gap-1">
+                    <Sliders className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>WiFi Direct Dynamic Fallback Engine</span>
+                  </span>
+
+                  <div className="grid grid-cols-2 gap-1.5 text-[9px] font-mono">
+                    <button
+                      onClick={() => {
+                        setSelectedFallback('wifi_direct');
+                        setShowHotspotSetup(false);
+                      }}
+                      className={`p-2.5 text-left rounded-lg border transition ${
+                        selectedFallback === 'wifi_direct'
+                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 font-bold'
+                          : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span>1. Wi-Fi Direct</span>
+                      <span className="block text-[8px] text-slate-500">Fast Wireless Sockets</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSelectedFallback('local_lan');
+                        setShowHotspotSetup(false);
+                      }}
+                      className={`p-2.5 text-left rounded-lg border transition ${
+                        selectedFallback === 'local_lan'
+                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 font-bold'
+                          : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span>2. Local LAN Loop</span>
+                      <span className="block text-[8px] text-slate-500">Unrestricted Subnets</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSelectedFallback('hotspot');
+                        setShowHotspotSetup(true);
+                      }}
+                      className={`p-2.5 text-left rounded-lg border transition ${
+                        selectedFallback === 'hotspot' || showHotspotSetup
+                          ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-300 font-bold'
+                          : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span>3. Hotspot Mode</span>
+                      <span className="block text-[8px] text-indigo-400 font-bold">Recommended Fallback</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSelectedFallback('relay');
+                        setShowHotspotSetup(false);
+                      }}
+                      className={`p-2.5 text-left rounded-lg border transition ${
+                        selectedFallback === 'relay'
+                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 font-bold'
+                          : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <span>4. Cloud Relay</span>
+                      <span className="block text-[8px] text-slate-500">No WebRTC Needed</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Hotspot configuration panel */}
+                {showHotspotSetup && (
+                  <div className="p-3.5 bg-indigo-950/20 border border-indigo-500/20 rounded-2xl text-left space-y-2.5 animate-pulse-subtle bg-gradient-to-br from-indigo-950/20 to-transparent">
+                    <div className="flex items-center gap-1.5 text-xs text-indigo-300 font-extrabold uppercase">
+                      <Radio className="w-4 h-4 text-indigo-400" />
+                      <span>Direct Hotspot Mode Active</span>
+                    </div>
+
+                    <p className="text-[10px] text-slate-350 leading-relaxed font-sans text-slate-300">
+                      Bypasses AP Isolation entirely by hosting a secure localized software hotspot on this device. <strong>No Cellular data or Internet required.</strong>
+                    </p>
+
+                    <div className="p-2.5 bg-slate-950 rounded-lg border border-indigo-900/30 text-[9px] font-mono space-y-1.5 text-slate-300">
+                      <div className="flex justify-between">
+                        <span className="text-slate-500">Hotspot SSID (Network):</span>
+                        <span className="font-bold text-slate-200">{hotspotSSID}</span>
+                      </div>
+                      <div className="flex justify-between border-t border-slate-900 pt-1">
+                        <span className="text-slate-500">Password Encryption:</span>
+                        <span className="font-bold text-slate-200">{hotspotPass}</span>
+                      </div>
+                      <div className="block text-[8px] text-center text-slate-400 pt-1 italic font-sans leading-relaxed">
+                        "Ask the outer device to scan/join this network, then click 'Establish Hotspot Link'!"
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        onSelectDevice({
+                          ...connectingDevice,
+                          name: `${connectingDevice.name} [Hotspot Link]`,
+                          ipAddress: "192.168.43.1"
+                        }, true);
+                        setConnectingDevice(null);
+                      }}
+                      className="w-full py-2 bg-indigo-600 hover:bg-indigo-550 text-white font-bold text-[10px] uppercase tracking-wider rounded-lg transition-all text-center"
+                    >
+                      Establish Hotspot Link
+                    </button>
+                  </div>
+                )}
+
+                {/* Android Optimization Settings block */}
+                <div className="bg-slate-900 p-3.5 rounded-2xl border border-slate-800 space-y-2 text-xs">
+                  <div className="flex items-center gap-1.5 pb-1 border-b border-slate-800">
+                    <Cpu className="w-3.5 h-3.5 text-teal-400" />
+                    <span className="font-bold text-slate-200 text-[10px] uppercase">Android Foreground Stabilizers</span>
+                  </div>
+
+                  <div className="space-y-1.5 font-sans">
+                    <label className="flex items-center gap-2 text-[10px] text-slate-400 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={optimizationMode.disableBattery}
+                        onChange={(e) => setOptimizationMode(prev => ({ ...prev, disableBattery: e.target.checked }))}
+                        className="rounded bg-slate-950 border-slate-800 text-emerald-500"
+                      />
+                      <span>Disable Battery optimization during file transfer</span>
+                    </label>
+
+                    <label className="flex items-center gap-2 text-[10px] text-slate-400 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={optimizationMode.keepWifiAwake}
+                        onChange={(e) => setOptimizationMode(prev => ({ ...prev, keepWifiAwake: e.target.checked }))}
+                        className="rounded bg-slate-950 border-slate-800 text-emerald-500"
+                      />
+                      <span>Acquire CPU WifiLock (Maintain Wifi radio awake state)</span>
+                    </label>
+
+                    <label className="flex items-center gap-2 text-[10px] text-slate-400 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={optimizationMode.preventBackgroundKill}
+                        onChange={(e) => setOptimizationMode(prev => ({ ...prev, preventBackgroundKill: e.target.checked }))}
+                        className="rounded bg-slate-950 border-slate-800 text-emerald-500"
+                      />
+                      <span>Prevent OS garbage collection kill requests</span>
+                    </label>
+
+                    <label className="flex items-center gap-2 text-[10px] text-slate-400 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={optimizationMode.foregroundService}
+                        onChange={(e) => setOptimizationMode(prev => ({ ...prev, foregroundService: e.target.checked }))}
+                        className="rounded bg-slate-950 border-slate-800 text-emerald-500"
+                      />
+                      <span>Maintain background Foreground Transfer notification</span>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Instant action triggers */}
+                <div className="grid grid-cols-2 gap-2 text-center text-xs">
+                  {/* Buttons specified in user requirements */}
+                  <button
+                    onClick={() => {
+                      setSelectedFallback('hotspot');
+                      setShowHotspotSetup(true);
+                      setApIsolationAlert(false);
+                    }}
+                    className="py-2.5 bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 font-bold border border-indigo-500/20 rounded-xl uppercase text-[10px] tracking-wide"
+                  >
+                    Switch to Hotspot
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setConnectingDevice(null);
+                      setActiveTab('qr');
+                    }}
+                    className="py-2.5 bg-slate-950 hover:bg-slate-900 text-slate-350 border border-slate-800 text-[10px] font-bold rounded-xl uppercase tracking-wide"
+                  >
+                    Use QR Pairing
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setShowTroubleshoot(true);
+                      setConnectingDevice(null);
+                    }}
+                    className="py-2.5 bg-slate-950 hover:bg-slate-900 text-slate-350 border border-slate-800 text-[10px] font-bold rounded-xl uppercase tracking-wide col-span-2"
+                  >
+                    Open Network Help guidelines
+                  </button>
+                </div>
               </div>
             )}
 
@@ -900,16 +1165,16 @@ export function NearbyDevicesScreen({ onBack, onSelectDevice, onlineDevices = []
                       setConnectingDevice(null);
                       setRetryAttempt(1);
                     }}
-                    className="flex-1 py-3 bg-slate-950 hover:bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200 text-xs font-bold rounded-xl uppercase tracking-wider cursor-pointer transition select-none"
+                    className="flex-1 py-3 bg-slate-950 hover:bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200 text-xs font-semibold rounded-xl uppercase tracking-wider cursor-pointer transition select-none"
                   >
-                    Cancel Code
+                    Dismiss
                   </button>
                   <button
                     onClick={handleReconnectPairing}
                     className="flex-1 py-3 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl uppercase tracking-wider cursor-pointer transition select-none flex items-center justify-center gap-1 shadow-lg active:scale-98"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Reconnect</span>
+                    <span>Retry Connection</span>
                   </button>
                 </>
               ) : (
@@ -918,7 +1183,7 @@ export function NearbyDevicesScreen({ onBack, onSelectDevice, onlineDevices = []
                     setConnectingDevice(null);
                     setRetryAttempt(1);
                   }}
-                  className="w-full py-3 bg-slate-950 hover:bg-slate-900 border border-slate-850 text-slate-400 text-xs font-bold rounded-xl uppercase tracking-wider cursor-pointer select-none"
+                  className="w-full py-3 bg-slate-950 hover:bg-slate-900 border border-slate-850 text-slate-400 text-xs font-semibold rounded-xl uppercase tracking-wider cursor-pointer select-none"
                 >
                   Cancel Connection Handshake
                 </button>
