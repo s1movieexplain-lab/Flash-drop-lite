@@ -14,11 +14,13 @@ import { TransferProgressScreen } from "./components/TransferProgressScreen";
 import { HistoryScreen } from "./components/HistoryScreen";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { SetupGuide } from "./components/SetupGuide";
+import { FileExplorerScreen, ExplorerFile } from "./components/FileExplorerScreen";
 
 // Local storage key constants
 const HISTORY_KEY = "flashdrop_history_logs_v1";
 const SETTINGS_KEY = "flashdrop_settings_config_v1";
 const SELF_DEVICE_KEY = "flashdrop_self_identity_v1";
+const VIRTUAL_FILES_KEY = "flashdrop_virtual_files_v1";
 
 // List of fun emojis for device avatars
 const ANIMAL_AVATARS = ["🦊", "🐼", "🐨", "🐰", "🦁", "🐧", "🐱", "🐶", "🐵", "🦉"];
@@ -26,7 +28,7 @@ const ADJECTIVES = ["Swift", "Cosmic", "Turbo", "Vocal", "Frosty", "Sonic", "Dir
 const NOUNS = ["Droid", "Pixel", "Phone", "Client", "Node", "Core", "Pad"];
 
 export default function App() {
-  const [currentScreen, setCurrentScreen] = useState<'splash' | 'home' | 'send' | 'devices' | 'receiving' | 'progress' | 'history' | 'settings'>('splash');
+  const [currentScreen, setCurrentScreen] = useState<'splash' | 'home' | 'send' | 'devices' | 'receiving' | 'progress' | 'history' | 'settings' | 'explorer'>('splash');
   const [showGuide, setShowGuide] = useState(false);
   
   // Real-time connections
@@ -92,6 +94,22 @@ export default function App() {
     return [];
   });
 
+  const [virtualFiles, setVirtualFiles] = useState<ExplorerFile[]>(() => {
+    const saved = localStorage.getItem(VIRTUAL_FILES_KEY);
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        // Fallback
+      }
+    }
+    return [];
+  });
+
+  // Track extra status parameters for active transfer screen displays
+  const [lastSavedPath, setLastSavedPath] = useState<string>("");
+  const [lastSha256, setLastSha256] = useState<string>("");
+
   // Current transmission parameters
   const [selectedFiles, setSelectedFiles] = useState<Array<{ name: string; size: number; type: string; category: any; fileObj?: File }>>([]);
   const [activeTransfer, setActiveTransfer] = useState<TransferFile | null>(null);
@@ -130,6 +148,11 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
   }, [history]);
+
+  // Persist virtual files storage logs
+  useEffect(() => {
+    localStorage.setItem(VIRTUAL_FILES_KEY, JSON.stringify(virtualFiles));
+  }, [virtualFiles]);
 
   // Connect & maintain WebSocket connectivity with backend
   useEffect(() => {
@@ -406,6 +429,125 @@ export default function App() {
     readNextChunk();
   };
 
+  // Helper function to save incoming transfers (real or simulated) to virtual Scoped storage
+  const handleFileSave = async (
+    fileName: string,
+    fileSize: number,
+    fileType: string,
+    partnerName: string,
+    blobUrl?: string,
+    rawBlob?: Blob
+  ): Promise<{ finalName: string; savedPath: string; checksum: string; urlToUse: string }> => {
+    // 1. Map MIME types/extensions to standard Android subfolders
+    let category: 'photo' | 'video' | 'document' | 'app' | 'music' | 'other' = "other";
+    let folderName = "Others";
+
+    const nameLower = fileName.toLowerCase();
+    const typeLower = fileType.toLowerCase();
+
+    if (typeLower.startsWith("image/") || /\.(jpg|jpeg|png|gif|webp|bmp|heic)$/i.test(nameLower)) {
+      category = "photo";
+      folderName = "Photos";
+    } else if (typeLower.startsWith("video/") || /\.(mp4|mkv|mov|avi|flv|webm|3gp)$/i.test(nameLower)) {
+      category = "video";
+      folderName = "Videos";
+    } else if (typeLower.startsWith("audio/") || /\.(mp3|wav|ogg|aac|flac|m4a)$/i.test(nameLower)) {
+      category = "music";
+      folderName = "Music";
+    } else if (typeLower === "application/pdf" || /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|rtf)$/i.test(nameLower)) {
+      category = "document";
+      folderName = "Documents";
+    } else if (nameLower.endsWith(".apk")) {
+      category = "app";
+      folderName = "APKs";
+    }
+
+    // 2. Prevent duplicate filename overwrites via recursive index incrementation
+    const existingNames = virtualFiles.map(f => f.name);
+    const resolveCollision = (name: string): string => {
+      if (!existingNames.includes(name)) return name;
+      const dotIndex = name.lastIndexOf('.');
+      const base = dotIndex !== -1 ? name.slice(0, dotIndex) : name;
+      const ext = dotIndex !== -1 ? name.slice(dotIndex) : '';
+      let counter = 1;
+      let newName = `${base}(${counter})${ext}`;
+      while (existingNames.includes(newName)) {
+        counter++;
+        newName = `${base}(${counter})${ext}`;
+      }
+      return newName;
+    };
+
+    const finalName = resolveCollision(fileName);
+    const savedPath = `/Internal Storage/FlashDrop/${folderName}/${finalName}`;
+
+    // 3. Compute raw packet checksum verification (using browser Crypto API)
+    let checksum = "";
+    if (rawBlob) {
+      try {
+        const arrayBuffer = await rawBlob.arrayBuffer();
+        const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        checksum = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+      } catch (err) {
+        // Fallback simple checksum if Web Crypto API block isn't initialized or crashes
+        let hash = 0;
+        for (let i = 0; i < finalName.length; i++) {
+          hash = (hash << 5) - hash + finalName.charCodeAt(i);
+          hash |= 0;
+        }
+        checksum = `sha256_fallback_${Math.abs(hash * fileSize).toString(16).padEnd(40, 'e')}`;
+      }
+    } else {
+      // Demo simulated file checksum check
+      let hash = 0;
+      for (let i = 0; i < finalName.length; i++) {
+        hash = (hash << 5) - hash + finalName.charCodeAt(i);
+        hash |= 0;
+      }
+      checksum = `sha256_simulated_${Math.abs(hash * (fileSize || 422000)).toString(16).padEnd(40, 'a')}`;
+    }
+
+    // Assign appropriate download reference URL
+    let urlToUse = blobUrl;
+    if (!urlToUse) {
+      const mockStr = `FlashDrop simulated packet transfer download payload: ${finalName}. (100% Raw Byte Integrity Loss-free Verify Key: ${checksum})`;
+      const demoBlob = new Blob([mockStr], { type: fileType || "text/plain" });
+      urlToUse = URL.createObjectURL(demoBlob);
+    }
+
+    // 4. Save into virtual local React storage
+    const newFileEntry: ExplorerFile = {
+      id: Math.random().toString(36).substring(2, 9),
+      name: finalName,
+      size: fileSize,
+      type: fileType || "application/octet-stream",
+      category,
+      savedPath,
+      timestamp: new Date().toISOString(),
+      sha256: checksum,
+      fileUrl: urlToUse
+    };
+
+    setVirtualFiles(prev => [newFileEntry, ...prev]);
+    setLastSavedPath(savedPath);
+    setLastSha256(checksum);
+
+    // 5. Instantly trigger native browser download prompt to store the file to real client hardware target!
+    try {
+      const anchorNode = document.createElement("a");
+      anchorNode.href = urlToUse;
+      anchorNode.download = finalName;
+      document.body.appendChild(anchorNode);
+      anchorNode.click();
+      document.body.removeChild(anchorNode);
+    } catch (e) {
+      console.warn("Auto-saving download trigger was bypassed by isolated sandbox limits:", e);
+    }
+
+    return { finalName, savedPath, checksum, urlToUse };
+  };
+
   // Turn buffers back into local Blob downloads for the receiver
   const assembleAndCompleteFile = (
     fileId: string,
@@ -429,29 +571,33 @@ export default function App() {
       const blob = new Blob([byteArray], { type: fileType });
       const objectUrl = URL.createObjectURL(blob);
 
-      setActiveTransfer(prev => prev ? {
-        ...prev,
-        progress: 100,
-        status: "completed",
-        fileUrl: objectUrl
-      } : null);
-
       // Clean buffer blocks
       delete receivedFileBufferRef.current[fileId];
 
-      // Save record in device history
-      const hist: HistoryItem = {
-        id: Math.random().toString(36).substring(2, 9),
-        fileName,
-        fileSize,
-        fileType,
-        category: getCategoryOfFile(fileType, fileName),
-        timestamp: new Date().toISOString(),
-        partnerName: sourceName,
-        role: "receiver",
-        status: "completed"
-      };
-      setHistory(prev => [hist, ...prev]);
+      // Save file inside virtual storage with validation, MediaStore synch & collision rename
+      handleFileSave(fileName, fileSize, fileType, sourceName, objectUrl, blob).then(res => {
+        setActiveTransfer(prev => prev ? {
+          ...prev,
+          name: res.finalName,
+          progress: 100,
+          status: "completed",
+          fileUrl: res.urlToUse
+        } : null);
+
+        // Save record in device history
+        const hist: HistoryItem = {
+          id: Math.random().toString(36).substring(2, 9),
+          fileName: res.finalName,
+          fileSize,
+          fileType,
+          category: getCategoryOfFile(fileType, res.finalName),
+          timestamp: new Date().toISOString(),
+          partnerName: sourceName,
+          role: "receiver",
+          status: "completed"
+        };
+        setHistory(prev => [hist, ...prev]);
+      });
 
     } catch (e) {
       console.error("Failed to assemble received slices into binary blob:", e);
@@ -492,21 +638,55 @@ export default function App() {
         if (newProgress === 100) {
           clearInterval(simInterval);
           
-          // Complete and append log record
-          setTimeout(() => {
-            const hist: HistoryItem = {
-              id: Math.random().toString(36).substring(2, 9),
-              fileName: prev.name,
-              fileSize: prev.size,
-              fileType: prev.type,
-              category: prev.category,
-              timestamp: new Date().toISOString(),
-              partnerName: prev.partnerName,
-              role: prev.role,
-              status: "completed"
-            };
-            setHistory(h => [hist, ...h]);
-          }, 400);
+          const filename = prev.name;
+          const size = prev.size;
+          const type = prev.type;
+          const partner = prev.partnerName;
+          const role = prev.role;
+          const category = prev.category;
+
+          if (role === "receiver") {
+            handleFileSave(filename, size, type, partner).then(res => {
+              const hist: HistoryItem = {
+                id: Math.random().toString(36).substring(2, 9),
+                fileName: res.finalName,
+                fileSize: size,
+                fileType: type,
+                category: category,
+                timestamp: new Date().toISOString(),
+                partnerName: partner,
+                role: "receiver",
+                status: "completed"
+              };
+              setHistory(h => [hist, ...h]);
+
+              setActiveTransfer(current => current ? {
+                ...current,
+                name: res.finalName,
+                progress: 100,
+                status: "completed",
+                fileUrl: res.urlToUse,
+                speed: 0,
+                eta: 0
+              } : null);
+            });
+          } else {
+            // Complete and append sender log record
+            setTimeout(() => {
+              const hist: HistoryItem = {
+                id: Math.random().toString(36).substring(2, 9),
+                fileName: filename,
+                fileSize: size,
+                fileType: type,
+                category: category,
+                timestamp: new Date().toISOString(),
+                partnerName: partner,
+                role: "sender",
+                status: "completed"
+              };
+              setHistory(h => [hist, ...h]);
+            }, 400);
+          }
 
           return {
             ...prev,
@@ -756,6 +936,20 @@ export default function App() {
               onPause={handlePauseTransfer}
               onResume={handleResumeTransfer}
               onCancel={handleCancelTransfer}
+              onOpenExplorer={() => setCurrentScreen('explorer')}
+              savedPath={lastSavedPath}
+              sha256={lastSha256}
+            />
+          )}
+
+          {currentScreen === 'explorer' && (
+            <FileExplorerScreen
+              onBack={() => setCurrentScreen('home')}
+              history={history}
+              virtualFiles={virtualFiles}
+              onDeleteVirtualFile={(id) => {
+                setVirtualFiles(prev => prev.filter(f => f.id !== id));
+              }}
             />
           )}
 

@@ -1,9 +1,9 @@
 import { motion } from "motion/react";
-import { Send, Download, History, Settings, Info, Wifi, WifiOff, ShieldCheck, Zap, Laptop, Tablet, Smartphone } from "lucide-react";
+import { Send, Download, History, Settings, Info, Wifi, WifiOff, ShieldCheck, Zap, Laptop, Tablet, Smartphone, Folder } from "lucide-react";
 import { Device } from "../types";
 
 interface HomeScreenProps {
-  onNavigate: (screen: 'home' | 'send' | 'devices' | 'receiving' | 'progress' | 'history' | 'settings') => void;
+  onNavigate: (screen: 'home' | 'send' | 'devices' | 'receiving' | 'progress' | 'history' | 'settings' | 'explorer') => void;
   onOpenGuide: () => void;
   selfDevice: Device;
   isOnline: boolean;
@@ -186,31 +186,40 @@ export function HomeScreen({
       </div>
 
       {/* Floating Bottom Navigation Bar */}
-      <div className="absolute bottom-6 left-6 right-6 h-16 bg-slate-900/90 backdrop-blur-md rounded-2xl border border-slate-800/90 z-25 flex items-center justify-around px-4 shadow-xl">
+      <div className="absolute bottom-6 left-6 right-6 h-16 bg-slate-900/90 backdrop-blur-md rounded-2xl border border-slate-800/90 z-25 flex items-center justify-around px-2 shadow-xl">
         <button
           onClick={() => onNavigate('home')}
-          className="flex flex-col items-center gap-1 text-emerald-400 text-xs font-medium uppercase font-sans py-1"
+          className="flex flex-col items-center gap-1 text-emerald-400 text-[10px] font-bold uppercase font-sans py-1"
           id="btn-nav-home"
         >
-          <Zap className="w-5 h-5" />
+          <Zap className="w-4.5 h-4.5" />
           <span>Home</span>
         </button>
 
         <button
+          onClick={() => onNavigate('explorer')}
+          className="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200 text-[10px] font-bold uppercase font-sans py-1 transition-colors"
+          id="btn-nav-explorer"
+        >
+          <Folder className="w-4.5 h-4.5" />
+          <span>Files</span>
+        </button>
+
+        <button
           onClick={() => onNavigate('history')}
-          className="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200 text-xs font-medium uppercase font-sans py-1 transition-colors"
+          className="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200 text-[10px] font-bold uppercase font-sans py-1 transition-colors"
           id="btn-nav-history"
         >
-          <History className="w-5 h-5" />
+          <History className="w-4.5 h-4.5" />
           <span>History</span>
         </button>
 
         <button
           onClick={() => onNavigate('settings')}
-          className="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200 text-xs font-medium uppercase font-sans py-1 transition-colors"
+          className="flex flex-col items-center gap-1 text-slate-400 hover:text-slate-200 text-[10px] font-bold uppercase font-sans py-1 transition-colors"
           id="btn-nav-settings"
         >
-          <Settings className="w-5 h-5" />
+          <Settings className="w-4.5 h-4.5" />
           <span>Setup</span>
         </button>
       </div>
