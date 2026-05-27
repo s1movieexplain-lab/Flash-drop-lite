@@ -1,0 +1,6 @@
+{
+  "name": "FlashDrop Lite",
+  "description": "An easy-to-use, high-speed file sharing app for videos, photos, documents, and folders with zero quality loss.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
