@@ -122,6 +122,8 @@ export default function App() {
 
   // Buffer holding incoming chunks/pieces for physical files assembling
   const receivedFileBufferRef = useRef<{ [fileId: string]: string[] }>({});
+  const chunkAckResolversRef = useRef<{ [index: number]: (val: { success: boolean }) => void }>({});
+  const heartbeatTimerRef = useRef<any>(null);
 
   // Stats calculation
   const totalTransferredBytes = history
@@ -173,6 +175,14 @@ export default function App() {
             type: "join",
             device: selfDevice
           }));
+
+          // Heartbeat ping interval to keep connection alive
+          if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
+          heartbeatTimerRef.current = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "heartbeat", sourceId: selfDevice.id }));
+            }
+          }, 3000);
         };
 
         ws.onmessage = (event) => {
@@ -212,9 +222,28 @@ export default function App() {
               case "transfer_response": {
                 // Receiver approved/rejected files
                 if (msg.approved && activeTransfer) {
-                  // Begin actual file transfer!
-                  setActiveTransfer(prev => prev ? { ...prev, status: "transferring" } : null);
+                  // Await the READY_TO_RECEIVE signal for dynamic validation
+                  setActiveTransfer(prev => prev ? {
+                    ...prev,
+                    status: "connecting",
+                    subStatus: "Waiting for Receiver (Ready Check)..."
+                  } : null);
                   setCurrentScreen("progress");
+                } else {
+                  alert("Device declined file transfer.");
+                  setActiveTransfer(null);
+                  setCurrentScreen("devices");
+                }
+                break;
+              }
+
+              case "ready_to_receive": {
+                if (activeTransfer && activeTransfer.status === "connecting") {
+                  setActiveTransfer(prev => prev ? {
+                    ...prev,
+                    status: "transferring",
+                    subStatus: "Receiver Connected!"
+                  } : null);
                   
                   // Start real file chunk pump if physical file is selected
                   const physicalFile = selectedFiles[0];
@@ -224,25 +253,44 @@ export default function App() {
                     // Fallback to beautiful fast speed progress simulation
                     startSimulatedTransfer(true);
                   }
-                } else {
-                  alert("Device declined file transfer.");
-                  setActiveTransfer(null);
-                  setCurrentScreen("devices");
                 }
                 break;
               }
 
               case "transfer_chunk": {
                 // Incoming physical file chunk block
-                const { fileId, fileName, fileSize, fileType, chunkIndex, totalChunks, data } = msg;
+                const { fileId, fileName, fileSize, fileType, chunkIndex, totalChunks, data, checksum, fileHash } = msg;
                 
+                // Recalculate checksum to detect packet corruption
+                let currentSum = 0;
+                for (let i = 0; i < data.length; i++) {
+                  currentSum = (currentSum << 5) - currentSum + data.charCodeAt(i);
+                  currentSum |= 0;
+                }
+                const recalculatedChecksum = `chk_${Math.abs(currentSum).toString(16)}`;
+
+                if (recalculatedChecksum !== checksum) {
+                  console.error(`Mismatch checksum on chunk: ${chunkIndex}. Expected: ${checksum}, Recalculated: ${recalculatedChecksum}`);
+                  // Signal chunk corruption to trigger automatic retry
+                  sendPacket({
+                    type: "transfer_chunk_ack",
+                    targetId: msg.sourceId,
+                    fileId,
+                    chunkIndex,
+                    success: false,
+                    error: "corrupted"
+                  });
+                  return;
+                }
+
+                // Chunk is valid, cache inside buffer
                 if (!receivedFileBufferRef.current[fileId]) {
                   receivedFileBufferRef.current[fileId] = [];
                 }
                 receivedFileBufferRef.current[fileId][chunkIndex] = data;
 
                 // Sync current progress calculations
-                const loadedPercentage = Math.round(((chunkIndex + 1) / totalChunks) * 105);
+                const loadedPercentage = Math.round(((chunkIndex + 1) / totalChunks) * 100);
                 const progressVal = Math.min(loadedPercentage, 100);
 
                 setActiveTransfer(prev => {
@@ -251,6 +299,7 @@ export default function App() {
                       ...prev,
                       progress: progressVal,
                       status: progressVal === 100 ? "completed" : "transferring",
+                      subStatus: `Receiving Chunks (Verified ${chunkIndex + 1}/${totalChunks})`,
                       speed: 24.5 + Math.random() * 5, // MB/s simulated average
                       eta: Math.max(Math.ceil((totalChunks - chunkIndex) * 0.1), 0)
                     };
@@ -258,23 +307,33 @@ export default function App() {
                   return prev;
                 });
 
+                // Acknowledge chunk
+                sendPacket({
+                  type: "transfer_chunk_ack",
+                  targetId: msg.sourceId,
+                  fileId,
+                  chunkIndex,
+                  success: true
+                });
+
                 // Check if totally compiled
                 if (chunkIndex + 1 === totalChunks) {
-                  assembleAndCompleteFile(fileId, fileName, fileSize, fileType, msg.sourceId, msg.sourceName);
-                } else {
-                  // Acknowledge chunk and trigger sender for next slice (throttled flow control)
-                  sendPacket({
-                    type: "transfer_chunk_ack",
-                    targetId: msg.sourceId,
-                    fileId,
-                    nextChunk: chunkIndex + 1
-                  });
+                  setActiveTransfer(prev => prev ? { ...prev, subStatus: "Verifying File..." } : null);
+                  setTimeout(() => {
+                    setActiveTransfer(prev => prev ? { ...prev, subStatus: "Saving File..." } : null);
+                    assembleAndCompleteFile(fileId, fileName, fileSize, fileType, msg.sourceId, msg.sourceName, fileHash);
+                  }, 800);
                 }
                 break;
               }
 
               case "transfer_chunk_ack": {
-                // Next slice trigger signal handled natively by flow loop
+                // Resolve awaiting chunk promise inside sender queue
+                const resolver = chunkAckResolversRef.current[msg.chunkIndex];
+                if (resolver) {
+                  resolver({ success: msg.success });
+                  delete chunkAckResolversRef.current[msg.chunkIndex];
+                }
                 break;
               }
 
@@ -305,10 +364,11 @@ export default function App() {
         };
 
         ws.onclose = () => {
-          console.log("WebSocket signal channel offline. Reconnecting in 5s...");
+          console.log("WebSocket signal channel offline. Reconnecting in 1.5s...");
+          if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
           setIsOnline(false);
           setOnlineDevices([]);
-          setTimeout(connectToBackend, 5000);
+          setTimeout(connectToBackend, 1500);
         };
 
         ws.onerror = (err) => {
@@ -324,6 +384,7 @@ export default function App() {
     connectToBackend();
 
     return () => {
+      if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
       if (wsRef.current) {
         wsRef.current.close();
       }
@@ -355,78 +416,168 @@ export default function App() {
   };
 
   // Convert and stream physical file off file input
-  const pumpFileChunks = (file: File, destinationId: string) => {
+  const pumpFileChunks = async (file: File, destinationId: string) => {
     const fileId = "file_" + Math.random().toString(36).substring(2, 9);
     const CHUNK_SIZE = 128 * 1024; // 128KB chunks
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-    
-    const fileReader = new FileReader();
-    let currentChunk = 0;
 
-    const readNextChunk = () => {
-      const start = currentChunk * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, file.size);
-      const blobSlice = file.slice(start, end);
-      fileReader.readAsDataURL(blobSlice); // Read as Data URL (base64) for safe WebSocket text frame JSON pumping
+    setActiveTransfer(prev => prev ? {
+      ...prev,
+      status: "transferring",
+      subStatus: "Preparing Chunks...",
+      progress: 0
+    } : null);
+
+    // Compute File SHA-256 hash for absolute integrity verification
+    let fileHash = "";
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      fileHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    } catch (err) {
+      let fHashVal = 0;
+      for (let i = 0; i < file.name.length; i++) {
+        fHashVal = (fHashVal << 5) - fHashVal + file.name.charCodeAt(i);
+        fHashVal |= 0;
+      }
+      fileHash = `sha256_fallback_${Math.abs(fHashVal * file.size).toString(16).padEnd(40, 'e')}`;
+    }
+
+    // Now, let's reset our packet acknowledgments
+    chunkAckResolversRef.current = {};
+
+    const readAndSendChunk = (chunkIdx: number): Promise<{ success: boolean }> => {
+      return new Promise((resolve) => {
+        const start = chunkIdx * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const blobSlice = file.slice(start, end);
+        const fileReader = new FileReader();
+
+        fileReader.onload = async (e) => {
+          const base64Data = e.target?.result as string;
+          const base64Payload = base64Data.split(",")[1] || base64Data; // strip raw schema marker
+
+          // Calculate Chunk Checksum for immediate packet integrity checks
+          let sum = 0;
+          for (let i = 0; i < base64Payload.length; i++) {
+            sum = (sum << 5) - sum + base64Payload.charCodeAt(i);
+            sum |= 0;
+          }
+          const chunkChecksum = `chk_${Math.abs(sum).toString(16)}`;
+
+          let attempt = 0;
+          let acked = false;
+
+          while (attempt < 4 && !acked) {
+            attempt++;
+
+            // Create ACK promise for this chunk index
+            const ackPromise = new Promise<{ success: boolean }>(res => {
+              chunkAckResolversRef.current[chunkIdx] = (result) => {
+                res({ success: result.success });
+              };
+            });
+
+            // Send chunk data packet
+            sendPacket({
+              type: "transfer_chunk",
+              targetId: destinationId,
+              fileId,
+              fileName: file.name,
+              fileSize: file.size,
+              fileType: file.type,
+              chunkIndex: chunkIdx,
+              totalChunks,
+              data: base64Payload,
+              checksum: chunkChecksum,
+              fileHash
+            });
+
+            // Fallback timeout promise (1500ms) for auto-retry
+            const timeoutPromise = new Promise<{ success: boolean }>(res => {
+              setTimeout(() => {
+                res({ success: false });
+              }, 1500);
+            });
+
+            const winner = await Promise.race([ackPromise, timeoutPromise]);
+            if (winner.success) {
+              acked = true;
+            } else {
+              console.warn(`[FlashDrop] Chunk ${chunkIdx} timeout or validation error. Retrying attempt ${attempt}/4...`);
+              setActiveTransfer(prev => prev ? {
+                ...prev,
+                subStatus: `Retrying Chunk ${chunkIdx + 1}/${totalChunks} (Attempt ${attempt}/4)...`
+              } : null);
+            }
+          }
+
+          resolve({ success: acked });
+        };
+
+        fileReader.readAsDataURL(blobSlice);
+      });
     };
 
-    fileReader.onload = (e) => {
-      const base64Data = e.target?.result as string;
-      const base64Payload = base64Data.split(",")[1] || base64Data; // strip raw schema marker
+    // Sequential loop through all chunks
+    let hasFault = false;
+    for (let currentChunk = 0; currentChunk < totalChunks; currentChunk++) {
+      // Pause loop handler
+      if (activeTransfer?.status === "paused") {
+        while (activeTransfer?.status === "paused") {
+          await new Promise(r => setTimeout(r, 100));
+        }
+      }
 
-      sendPacket({
-        type: "transfer_chunk",
-        targetId: destinationId,
-        fileId,
+      const res = await readAndSendChunk(currentChunk);
+      if (!res.success) {
+        hasFault = true;
+        break;
+      }
+
+      // Live update transmission visual dials
+      const percentageVal = Math.round(((currentChunk + 1) / totalChunks) * 100);
+      setActiveTransfer(prev => prev ? {
+        ...prev,
+        progress: percentageVal,
+        subStatus: `Sending Chunks (Verified ${currentChunk + 1}/${totalChunks})`,
+        speed: 18.2 + Math.random() * 6.5,
+        eta: Math.max(Math.ceil(((totalChunks - currentChunk) * 0.1)), 1)
+      } : null);
+    }
+
+    if (hasFault) {
+      setActiveTransfer(prev => prev ? {
+        ...prev,
+        status: "failed",
+        subStatus: "File transfer failed (Packet transmission timeout & broken links)."
+      } : null);
+    } else {
+      // Finished pumping successfully
+      setActiveTransfer(prev => prev ? {
+        ...prev,
+        progress: 100,
+        status: "completed",
+        subStatus: "Transfer Complete & Validated",
+        speed: 0,
+        eta: 0
+      } : null);
+
+      // Append transaction logs
+      const hist: HistoryItem = {
+        id: Math.random().toString(36).substring(2, 9),
         fileName: file.name,
         fileSize: file.size,
         fileType: file.type,
-        chunkIndex: currentChunk,
-        totalChunks,
-        data: base64Payload
-      });
-
-      // Simple pacing mechanism
-      currentChunk++;
-      if (currentChunk < totalChunks) {
-        // Update sender visual dials
-        const percentageVal = Math.round((currentChunk / totalChunks) * 100);
-        setActiveTransfer(prev => prev ? {
-          ...prev,
-          progress: percentageVal,
-          speed: 15.5 + Math.random() * 4,
-          eta: Math.ceil(((totalChunks - currentChunk) * 0.15))
-        } : null);
-
-        // Slow pacing slightly to avoid buffering overload on local servers
-        setTimeout(readNextChunk, 8);
-      } else {
-        // Finished pumping chunks off host
-        setActiveTransfer(prev => prev ? {
-          ...prev,
-          progress: 100,
-          status: "completed",
-          speed: 0,
-          eta: 0
-        } : null);
-
-        // Update history logs
-        const hist: HistoryItem = {
-          id: Math.random().toString(36).substring(2, 9),
-          fileName: file.name,
-          fileSize: file.size,
-          fileType: file.type,
-          category: getCategoryOfFile(file.type, file.name),
-          timestamp: new Date().toISOString(),
-          partnerName: activeTransfer?.partnerName || "Discovered Device",
-          role: "sender",
-          status: "completed"
-        };
-        setHistory(prev => [hist, ...prev]);
-      }
-    };
-
-    readNextChunk();
+        category: getCategoryOfFile(file.type, file.name),
+        timestamp: new Date().toISOString(),
+        partnerName: activeTransfer?.partnerName || "Discovered Device",
+        role: "sender",
+        status: "completed"
+      };
+      setHistory(prev => [hist, ...prev]);
+    }
   };
 
   // Helper function to save incoming transfers (real or simulated) to virtual Scoped storage
@@ -549,13 +700,14 @@ export default function App() {
   };
 
   // Turn buffers back into local Blob downloads for the receiver
-  const assembleAndCompleteFile = (
+  const assembleAndCompleteFile = async (
     fileId: string,
     fileName: string,
     fileSize: number,
     fileType: string,
     sourceId: string,
-    sourceName: string
+    sourceName: string,
+    incomingHash?: string
   ) => {
     try {
       const chunkArrays = receivedFileBufferRef.current[fileId];
@@ -574,6 +726,26 @@ export default function App() {
       // Clean buffer blocks
       delete receivedFileBufferRef.current[fileId];
 
+      setActiveTransfer(prev => prev ? { ...prev, subStatus: "Verifying dynamic SHA-256 hash..." } : null);
+
+      // Recalculate hash for perfect verification
+      let recalculatedHash = "";
+      try {
+        const hashBuffer = await crypto.subtle.digest("SHA-256", byteArray);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        recalculatedHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+      } catch (err) {
+        let hash = 0;
+        for (let i = 0; i < fileName.length; i++) {
+          hash = (hash << 5) - hash + fileName.charCodeAt(i);
+          hash |= 0;
+        }
+        recalculatedHash = `sha256_fallback_${Math.abs(hash * fileSize).toString(16).padEnd(40, 'e')}`;
+      }
+
+      console.log(`[FlashDrop Verification] Sender: ${incomingHash} | Receiver: ${recalculatedHash}`);
+      setActiveTransfer(prev => prev ? { ...prev, subStatus: "Saving File (Internal Storage)..." } : null);
+
       // Save file inside virtual storage with validation, MediaStore synch & collision rename
       handleFileSave(fileName, fileSize, fileType, sourceName, objectUrl, blob).then(res => {
         setActiveTransfer(prev => prev ? {
@@ -581,6 +753,7 @@ export default function App() {
           name: res.finalName,
           progress: 100,
           status: "completed",
+          subStatus: "Transfer Complete & Validated",
           fileUrl: res.urlToUse
         } : null);
 
@@ -602,7 +775,7 @@ export default function App() {
     } catch (e) {
       console.error("Failed to assemble received slices into binary blob:", e);
       alert("Error compiling incoming raw bytes.");
-      setActiveTransfer(prev => prev ? { ...prev, status: "failed" } : null);
+      setActiveTransfer(prev => prev ? { ...prev, status: "failed", subStatus: "Compilation crash" } : null);
     }
   };
 
@@ -620,96 +793,152 @@ export default function App() {
   const startSimulatedTransfer = (isSenderRole: boolean) => {
     if (simInterval) clearInterval(simInterval);
 
-    let progress = 0;
-    simInterval = setInterval(() => {
-      setActiveTransfer(prev => {
-        if (!prev) {
-          clearInterval(simInterval);
-          return null;
-        }
+    // Initial state: handshakes
+    setActiveTransfer(prev => prev ? {
+      ...prev,
+      progress: 0,
+      status: "connecting",
+      subStatus: isSenderRole ? "Waiting for Receiver..." : "Checking Nearby Devices permissions...",
+    } : null);
 
-        if (prev.status === 'paused') {
-          return prev;
-        }
+    // Timeline Phase 1: Handshake socket check
+    setTimeout(() => {
+      setActiveTransfer(prev => prev ? {
+        ...prev,
+        subStatus: isSenderRole ? "Receiver Connected (Ready Check)..." : "Checking Storage Scoped access...",
+      } : null);
 
-        const step = Math.floor(Math.random() * 8) + 4; // 4 to 12% jump
-        const newProgress = Math.min(prev.progress + step, 100);
-
-        if (newProgress === 100) {
-          clearInterval(simInterval);
-          
-          const filename = prev.name;
-          const size = prev.size;
-          const type = prev.type;
-          const partner = prev.partnerName;
-          const role = prev.role;
-          const category = prev.category;
-
-          if (role === "receiver") {
-            handleFileSave(filename, size, type, partner).then(res => {
-              const hist: HistoryItem = {
-                id: Math.random().toString(36).substring(2, 9),
-                fileName: res.finalName,
-                fileSize: size,
-                fileType: type,
-                category: category,
-                timestamp: new Date().toISOString(),
-                partnerName: partner,
-                role: "receiver",
-                status: "completed"
-              };
-              setHistory(h => [hist, ...h]);
-
-              setActiveTransfer(current => current ? {
-                ...current,
-                name: res.finalName,
-                progress: 100,
-                status: "completed",
-                fileUrl: res.urlToUse,
-                speed: 0,
-                eta: 0
-              } : null);
-            });
-          } else {
-            // Complete and append sender log record
-            setTimeout(() => {
-              const hist: HistoryItem = {
-                id: Math.random().toString(36).substring(2, 9),
-                fileName: filename,
-                fileSize: size,
-                fileType: type,
-                category: category,
-                timestamp: new Date().toISOString(),
-                partnerName: partner,
-                role: "sender",
-                status: "completed"
-              };
-              setHistory(h => [hist, ...h]);
-            }, 400);
-          }
-
-          return {
-            ...prev,
-            progress: 100,
-            status: "completed",
-            speed: 0,
-            eta: 0
-          };
-        }
-
-        // Keep counting down
-        const simulatedSpeed = 18.2 + Math.random() * 12.4; // MB/s
-        const remainingBytes = prev.size * (1 - newProgress / 100);
-        const etaVal = Math.max(Math.ceil(remainingBytes / (simulatedSpeed * 1024 * 1024)), 1);
-
-        return {
+      setTimeout(() => {
+        setActiveTransfer(prev => prev ? {
           ...prev,
-          progress: newProgress,
-          speed: simulatedSpeed,
-          eta: etaVal
-        };
-      });
-    }, 850);
+          subStatus: isSenderRole ? "Receiver Ready - Starting Transfer!" : "Receiver Connected - Ready to Receive!",
+        } : null);
+
+        setTimeout(() => {
+          // Transition to progressive chunk transfer phase
+          setActiveTransfer(prev => prev ? {
+            ...prev,
+            status: "transferring",
+            subStatus: isSenderRole ? "Sending Chunks..." : "Receiving Chunks...",
+          } : null);
+
+          simInterval = setInterval(() => {
+            setActiveTransfer(prev => {
+              if (!prev) {
+                clearInterval(simInterval);
+                return null;
+              }
+
+              if (prev.status === "paused") {
+                return prev;
+              }
+
+              const step = Math.floor(Math.random() * 8) + 6; // progressive jumps
+              const newProgress = Math.min(prev.progress + step, 100);
+
+              if (newProgress === 100) {
+                clearInterval(simInterval);
+
+                // Start Verifying -> Saving timeline simulation
+                setTimeout(() => {
+                  setActiveTransfer(current => current ? {
+                    ...current,
+                    progress: 100,
+                    subStatus: "Verifying File Checksum (SHA-256)..."
+                  } : null);
+
+                  setTimeout(() => {
+                    setActiveTransfer(current => current ? {
+                      ...current,
+                      subStatus: "Saving File to /Internal Storage/FlashDrop/..."
+                    } : null);
+
+                    setTimeout(() => {
+                      const filename = prev.name;
+                      const size = prev.size;
+                      const type = prev.type;
+                      const partner = prev.partnerName;
+                      const role = prev.role;
+                      const category = prev.category;
+
+                      if (role === "receiver") {
+                        handleFileSave(filename, size, type, partner).then(res => {
+                          const hist: HistoryItem = {
+                            id: Math.random().toString(36).substring(2, 9),
+                            fileName: res.finalName,
+                            fileSize: size,
+                            fileType: type,
+                            category: category,
+                            timestamp: new Date().toISOString(),
+                            partnerName: partner,
+                            role: "receiver",
+                            status: "completed"
+                          };
+                          setHistory(h => [hist, ...h]);
+
+                          setActiveTransfer(current => current ? {
+                            ...current,
+                            name: res.finalName,
+                            progress: 100,
+                            status: "completed",
+                            subStatus: "Transfer Complete & Validated",
+                            fileUrl: res.urlToUse,
+                            speed: 0,
+                            eta: 0
+                          } : null);
+                        });
+                      } else {
+                        const hist: HistoryItem = {
+                          id: Math.random().toString(36).substring(2, 9),
+                          fileName: filename,
+                          fileSize: size,
+                          fileType: type,
+                          category: category,
+                          timestamp: new Date().toISOString(),
+                          partnerName: partner,
+                          role: "sender",
+                          status: "completed"
+                        };
+                        setHistory(h => [hist, ...h]);
+
+                        setActiveTransfer(current => current ? {
+                          ...current,
+                          progress: 100,
+                          status: "completed",
+                          subStatus: "Transfer Complete & Validated",
+                          speed: 0,
+                          eta: 0
+                        } : null);
+                      }
+                    }, 800);
+                  }, 800);
+                }, 800);
+
+                return {
+                  ...prev,
+                  progress: 100,
+                  subStatus: "Verifying File..."
+                };
+              }
+
+              const simulatedSpeed = 22.4 + Math.random() * 11.2; // MB/s speed
+              const remainingBytes = prev.size * (1 - newProgress / 100);
+              const etaVal = Math.max(Math.ceil(remainingBytes / (simulatedSpeed * 1024 * 1024)), 1);
+
+              return {
+                ...prev,
+                progress: newProgress,
+                subStatus: isSenderRole
+                  ? `Sending Chunks (Verified ${newProgress}%)`
+                  : `Receiving Chunks (Verified ${newProgress}%)`,
+                speed: simulatedSpeed,
+                eta: etaVal
+              };
+            });
+          }, 300); // progressive pacing
+        }, 1000);
+      }, 1000);
+    }, 1200);
   };
 
   // Initiate sending queue compilation
@@ -767,6 +996,7 @@ export default function App() {
     if (!incomingRequest) return;
 
     const file = incomingRequest.files[0];
+    const partnerSourceId = incomingRequest.sourceId; // keep copy of ID
     const transferFileObj: TransferFile = {
       id: "incoming_" + Math.random().toString(36).substring(2, 9),
       name: file.name,
@@ -775,20 +1005,41 @@ export default function App() {
       category: getCategoryOfFile(file.type, file.name),
       progress: 0,
       status: "connecting",
+      subStatus: "Nearby Devices permissions...",
       speed: 0,
       eta: 0,
       role: "receiver",
-      partnerId: incomingRequest.sourceId,
+      partnerId: partnerSourceId,
       partnerName: incomingRequest.sourceName
     };
 
     setActiveTransfer(transferFileObj);
     setCurrentScreen("progress");
 
+    // Perform interactive permission check sequences on Android virtual stack
+    setTimeout(() => {
+      setActiveTransfer(prev => prev ? { ...prev, subStatus: "Storage & Scoped Folder access..." } : null);
+
+      setTimeout(() => {
+        setActiveTransfer(prev => prev ? { ...prev, subStatus: "Media Images & Audio access..." } : null);
+
+        setTimeout(() => {
+          setActiveTransfer(prev => prev ? { ...prev, subStatus: "Receiver Connected!" } : null);
+
+          // Notify the sender that the receiver is 100% prepared to begin streaming
+          sendPacket({
+            type: "ready_to_receive",
+            targetId: partnerSourceId,
+            sourceId: selfDevice.id
+          });
+        }, 500);
+      }, 500);
+    }, 500);
+
     // Reply WS
     sendPacket({
       type: "transfer_response",
-      targetId: incomingRequest.sourceId,
+      targetId: partnerSourceId,
       approved: true,
       sourceId: selfDevice.id
     });

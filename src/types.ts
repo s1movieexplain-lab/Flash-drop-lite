@@ -19,6 +19,7 @@ export interface TransferFile {
   category: FileCategory;
   progress: number; // 0 to 100
   status: 'pending' | 'connecting' | 'transferring' | 'paused' | 'completed' | 'failed' | 'rejected' | 'canceled';
+  subStatus?: string; // Granular Android transport/handshake status
   speed: number; // in MB/s
   eta: number; // in seconds
   role: 'sender' | 'receiver';
