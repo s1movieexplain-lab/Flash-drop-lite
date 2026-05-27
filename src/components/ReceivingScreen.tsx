@@ -33,6 +33,17 @@ export function ReceivingScreen({
   const appBaseUrl = window.location.origin;
   const pairingUrl = `${appBaseUrl}?pair=${selfDevice.id}`;
 
+  const getPasscodeFromId = (id: string) => {
+    let hash = 0;
+    for (let i = 0; i < id.length; i++) {
+      hash = id.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const numericCode = Math.abs(hash) % 900000 + 100000;
+    return `FD-${numericCode}`;
+  };
+
+  const manualPasscode = getPasscodeFromId(selfDevice.id);
+
   useEffect(() => {
     // Generate pairing QR code using the installed `qrcode` package
     QRCode.toDataURL(pairingUrl, {
@@ -215,6 +226,12 @@ export function ReceivingScreen({
                 >
                   {copied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Clipboard className="w-3.5 h-3.5" />}
                 </button>
+              </div>
+
+              {/* Manual Connection Passcode widget */}
+              <div className="w-full bg-slate-950 p-3 rounded-xl border border-dashed border-emerald-500/20 text-center space-y-1">
+                <span className="text-[9px] uppercase tracking-widest font-mono text-slate-500 font-bold block">Manual Link Passcode</span>
+                <span className="text-base font-bold font-mono tracking-widest text-emerald-400 select-all">{manualPasscode}</span>
               </div>
             </div>
 
